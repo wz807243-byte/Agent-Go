@@ -71,6 +71,9 @@ func symbols(src, path string, matches [][]string, side int) ([]symbol, error) {
 	return out, nil
 }
 func inspect() ([]change, error) {
+	return inspectSelected("")
+}
+func inspectSelected(target string) ([]change, error) {
 	names, err := git("diff", "--cached", "--no-renames", "--name-only", "-z", "--", "*.go")
 	if err != nil {
 		return nil, err
@@ -78,6 +81,9 @@ func inspect() ([]change, error) {
 	out := []change{}
 	for _, path := range strings.Split(names, "\x00") {
 		if path == "" {
+			continue
+		}
+		if target != "" && path != target {
 			continue
 		}
 		patch, err := git("--literal-pathspecs", "diff", "--cached", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0", "--", path)

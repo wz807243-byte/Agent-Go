@@ -21,6 +21,16 @@ func run() error {
 		return nil
 	}
 	if os.Args[1] == "agent" {
+		if len(os.Args) >= 3 && (os.Args[2] == "--file" || os.Args[2] == "--path") {
+			if len(os.Args) < 4 {
+				return fmt.Errorf("用法: go run . agent --file review.go [审查要求]")
+			}
+			task := strings.Join(os.Args[4:], " ")
+			if task == "" {
+				task = "检查指定文件中的正确性问题"
+			}
+			return runFileAgent(task, os.Args[3])
+		}
 		if len(os.Args) < 3 {
 			return fmt.Errorf("用法: go run . agent 检查当前项目")
 		}

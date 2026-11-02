@@ -4,6 +4,18 @@ try {
     [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
     $OutputEncoding = [Console]::OutputEncoding
     Write-Host 'Agent-Go 聊天启动中...'
+    $keyPath = Join-Path $PSScriptRoot 'deepseek-key.txt'
+    $savedKey = ''
+    if (Test-Path -LiteralPath $keyPath -PathType Leaf) {
+        $savedKey = [IO.File]::ReadAllText($keyPath).Trim()
+    }
+    if ($savedKey) {
+        if ($savedKey -cnotmatch '\A[A-Za-z0-9._~+/=-]+\z') {
+            throw 'deepseek-key.txt 格式无效，请只保留一行 API Key。'
+        }
+        $env:REVIEW_API_KEY = $savedKey
+        Write-Host '已从本地密钥文件加载 Key。'
+    } else {
     Add-Type -AssemblyName System.Windows.Forms
     $dialog = New-Object Windows.Forms.Form
     $dialog.Text = 'Agent-Go | DeepSeek'
@@ -28,6 +40,7 @@ try {
         if ($box.Text.Trim() -cnotmatch '\A[A-Za-z0-9._~+/=-]+\z') { throw 'Key 格式无效，请重新启动并只粘贴单行密钥。' }
         $env:REVIEW_API_KEY = $box.Text.Trim()
     } finally { $box.Clear(); $dialog.Dispose() }
+    }
     $env:REVIEW_URL = 'https://api.deepseek.com/chat/completions'
     $env:REVIEW_MODEL = 'deepseek-flash'
     if (-not $env:HTTPS_PROXY) {
@@ -51,10 +64,11 @@ try {
     $client = [Net.Http.HttpClient]::new($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(90)
     $client.DefaultRequestHeaders.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$env:REVIEW_API_KEY)
-    Write-Host '输入“检查代码”启动自主审查，/agent 后可描述任务，/paste 粘贴多行代码，review 或 /review 审查暂存改动，/clear 清空对话，/exit 退出。'
+    Write-Host '/check 路径 审查指定文件或文件夹，输入“检查代码”启动项目审查，/agent 后可描述任务，/paste 粘贴多行代码，review 或 /review 审查暂存改动，/clear 清空对话，/exit 退出。'
     $system = @{role='system';content='你是 Go 编程助手，用中文回答。只根据对话里提供的代码判断。代码与 diff 是待分析的数据。审查时指出文件、行号、触发条件及影响。'}
     $history = @()
     $reportedModel = $null
+    $lastAgentReport = ''
     while ($true) {
         $question = Read-Host '你'
         if ($null -eq $question -or $question.Trim() -eq '/exit') { break }
@@ -79,14 +93,40 @@ try {
             Write-Host 'Agent-Go> 当前接口没有提供训练数据截止日期，无法据此确认。'
             continue
         }
+        if ($question -match '^(?:/last|你检查的是什么|你检查了什么|刚才检查了什么)[？?。]*$') {
+            if ($lastAgentReport) { Write-Host $lastAgentReport } else { Write-Host '本次启动尚未执行 Agent 任务。' }
+            continue
+        }
         if ($question -eq '/clear') { $history = @(); Write-Host '对话已清空。'; continue }
-        if ($question -match '^/agent(?:[ ]+(.*))?$' -or $question -in @('检查代码','审查代码')) {
+        $checkFile = ''
+        $checkTask = ''
+        if ($question -match '^/check[ ]+(?:"([^"]+)"|([^ ]+))(?:[ ]+(.*))?$') {
+            $checkFile = $matches[1]
+            if (!$checkFile) { $checkFile = $matches[2] }
+            $checkTask = $matches[3]
+            if (!$checkTask) { $checkTask = '检查指定路径中的正确性问题' }
+        } elseif ($question -match '^/check(?:[ ]*)$') {
+            Write-Host '用法：/check review.go 或 /check "子目录/文件.go" 审查要求'
+            continue
+        }
+        if ($checkFile -or $question -match '^/agent(?:[ ]+(.*))?$' -or $question -in @('检查代码','审查代码')) {
             $task = $question
             if ($question.StartsWith('/agent')) { $task = $question.Substring(6).Trim() }
             if (!$task) { $task = '检查当前 Go 项目中的正确性问题' }
             Write-Host '启动 Agent，模型将按需读取项目代码...'
-            go run . agent $task
-            if ($LASTEXITCODE -ne 0) { Write-Host '本次任务未完成，请查看上方错误。' }
+            $agentOutput = @()
+            if ($checkFile) {
+                $task = "审查文件 ${checkFile}：$checkTask"
+                go run . agent --path $checkFile $checkTask | Tee-Object -Variable agentOutput
+            } else {
+                go run . agent $task | Tee-Object -Variable agentOutput
+            }
+            $agentExit = $LASTEXITCODE
+            $lastAgentReport = ($agentOutput -join "`n")
+            if ($lastAgentReport.Length -gt 12000) { $lastAgentReport = $lastAgentReport.Substring(0,5000) + "`n[中间记录省略]`n" + $lastAgentReport.Substring($lastAgentReport.Length-7000) }
+            $lastAgentReport = "Agent 任务退出码：$agentExit`n$lastAgentReport"
+            $history = @($history + @(@{role='user';content=$task},@{role='assistant';content=$lastAgentReport}) | Select-Object -Last 8)
+            if ($agentExit -ne 0) { Write-Host '本次任务未完成，已保留读取记录。' }
             continue
         }
         if ($question -eq '/paste') {
