@@ -41,6 +41,7 @@ func TestAgentToolLoop(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("REVIEW_URL", srv.URL)
 	t.Setenv("REVIEW_MODEL", "mock")
+	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
 	if err := runAgent("check code"); err != nil {
 		t.Fatal(err)
@@ -87,6 +88,7 @@ func TestAgentRejectsToolsDuringSummary(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("REVIEW_URL", srv.URL)
 	t.Setenv("REVIEW_MODEL", "mock")
+	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
 	err := runAgent("check")
 	if err == nil || !strings.Contains(err.Error(), "汇报轮") || count != 3 {
@@ -122,6 +124,7 @@ func TestAgentReservedSummary(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("REVIEW_URL", srv.URL)
 	t.Setenv("REVIEW_MODEL", "mock")
+	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
 	if err := runAgent("check"); err != nil {
 		t.Fatal(err)
@@ -188,6 +191,7 @@ func TestFileAgentRestrictsAllTools(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("REVIEW_URL", srv.URL)
 	t.Setenv("REVIEW_MODEL", "mock")
+	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
 	if err := runFileAgent("check", "target.go"); err != nil {
 		t.Fatal(err)
@@ -237,6 +241,7 @@ func TestExternalDirectoryAgent(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("REVIEW_URL", srv.URL)
 	t.Setenv("REVIEW_MODEL", "mock")
+	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
 	if err := runFileAgent("check", root); err != nil {
 		t.Fatal(err)
