@@ -30,6 +30,15 @@ func review(changes []change) error {
 		return fmt.Errorf("变更数据超过 48000 字节，本次未审查。请分批暂存")
 	}
 	endpoint, model := os.Getenv("REVIEW_URL"), os.Getenv("REVIEW_MODEL")
+	if endpoint == "" {
+		endpoint = "https://api.deepseek.com/chat/completions"
+	}
+	if model == "" && endpoint == "https://api.deepseek.com/chat/completions" {
+		model = "deepseek-flash"
+	}
+	if endpoint == "https://api.deepseek.com/chat/completions" && os.Getenv("REVIEW_API_KEY") == "" {
+		return fmt.Errorf("请在当前终端设置 REVIEW_API_KEY")
+	}
 	if endpoint == "" || model == "" {
 		return fmt.Errorf("请配置 REVIEW_URL（完整 chat/completions 地址）和 REVIEW_MODEL")
 	}

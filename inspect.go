@@ -13,6 +13,7 @@ import (
 type symbol struct {
 	Name        string
 	First, Last int
+	Code        string
 }
 type change struct {
 	File, Diff    string
@@ -63,7 +64,9 @@ func symbols(src, path string, matches [][]string, side int) ([]symbol, error) {
 				name = string([]rune(name)[:100])
 			}
 		}
-		out = append(out, symbol{name, first, last})
+		start := fs.PositionFor(d.Pos(), false).Offset
+		end := fs.PositionFor(d.End(), false).Offset
+		out = append(out, symbol{Name: name, First: first, Last: last, Code: src[start:end]})
 	}
 	return out, nil
 }
