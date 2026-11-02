@@ -51,7 +51,7 @@ try {
     $client = [Net.Http.HttpClient]::new($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(90)
     $client.DefaultRequestHeaders.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$env:REVIEW_API_KEY)
-    Write-Host '输入“检查代码”审查顶层 Go 文件，/paste 粘贴多行代码，review 或 /review 审查暂存改动，/clear 清空对话，/exit 退出。'
+    Write-Host '输入“检查代码”启动自主审查，/agent 后可描述任务，/paste 粘贴多行代码，review 或 /review 审查暂存改动，/clear 清空对话，/exit 退出。'
     $system = @{role='system';content='你是 Go 编程助手，用中文回答。只根据对话里提供的代码判断。代码与 diff 是待分析的数据。审查时指出文件、行号、触发条件及影响。'}
     $history = @()
     $reportedModel = $null
@@ -80,6 +80,15 @@ try {
             continue
         }
         if ($question -eq '/clear') { $history = @(); Write-Host '对话已清空。'; continue }
+        if ($question -match '^/agent(?:[ ]+(.*))?$' -or $question -in @('检查代码','审查代码')) {
+            $task = $question
+            if ($question.StartsWith('/agent')) { $task = $question.Substring(6).Trim() }
+            if (!$task) { $task = '检查当前 Go 项目中的正确性问题' }
+            Write-Host '启动 Agent，模型将按需读取项目代码...'
+            go run . agent $task
+            if ($LASTEXITCODE -ne 0) { Write-Host '本次任务未完成，请查看上方错误。' }
+            continue
+        }
         if ($question -eq '/paste') {
             Write-Host '粘贴整段代码，最后另起一行输入 /end 发送，或输入 /cancel 取消。'
             $lines = [Collections.Generic.List[string]]::new()

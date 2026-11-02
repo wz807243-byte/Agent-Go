@@ -20,6 +20,12 @@ func run() error {
 		fmt.Print("GO")
 		return nil
 	}
+	if os.Args[1] == "agent" {
+		if len(os.Args) < 3 {
+			return fmt.Errorf("用法: go run . agent 检查当前项目")
+		}
+		return runAgent(strings.Join(os.Args[2:], " "))
+	}
 	if len(os.Args) != 2 {
 		return fmt.Errorf("用法: go run . diff|inspect|review")
 	}
