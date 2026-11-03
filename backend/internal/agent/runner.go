@@ -148,16 +148,25 @@ func RunPath(task, target string) (runErr error) {
 	defaultVersion := "working"
 	idleRounds := 0
 	summarize := false
+	reportOnly := false
+	reportTokens := taskcontext.ReportCompletionTokens
 	sent := 0
-	for step := 0; step < taskcontext.MaxRounds; step++ {
-		finalRound := summarize || step == taskcontext.MaxRounds-1 || sent > taskcontext.SummaryBytes
-		request := map[string]any{"model": model, "messages": messages, "tools": toolSpecs, "max_tokens": taskcontext.MaxCompletionTokens}
+	// A truncated response may use one extra request, even after the last round.
+	for step := 0; step < taskcontext.MaxRounds+taskcontext.MaxReportRetries; step++ {
+		finalRound := reportOnly || summarize || step >= taskcontext.MaxRounds-1 || sent > taskcontext.SummaryBytes
+		maxTokens := taskcontext.MaxCompletionTokens
+		request := map[string]any{"model": model, "messages": messages, "tools": toolSpecs}
 		if finalRound {
-			messages = append(messages, map[string]string{"role": "user", "content": "现在结束探索，依据已有证据汇报已检查范围、确认的问题和未检查部分。不要再调用工具，不要将假设当作缺陷。"})
+			if !reportOnly {
+				messages = append(messages, map[string]string{"role": "user", "content": "现在结束探索，依据已有证据汇报已检查范围、确认的问题和未检查部分。合并同一根因，简洁给出行号、触发条件、影响和修复建议。不要再调用工具，不要将假设当作缺陷。"})
+			}
+			reportOnly = true
+			maxTokens = reportTokens
 			request["messages"] = messages
 			request["tool_choice"] = "none"
 			fmt.Fprintln(os.Stderr, "进入汇报轮次...")
 		}
+		request["max_tokens"] = maxTokens
 		body, err := json.Marshal(request)
 		if err != nil {
 			return err
@@ -166,7 +175,11 @@ func RunPath(task, target string) (runErr error) {
 		if len(body) > taskcontext.MaxRequestBytes || sent > taskcontext.MaxTotalBytes {
 			return fmt.Errorf("达到上下文预算，审查未完成")
 		}
-		fmt.Fprintf(os.Stderr, "Agent 第 %d/8 轮分析...\n", step+1)
+		if record.ReportRetries > 0 {
+			fmt.Fprintf(os.Stderr, "Agent 汇报重试 %d/%d（输出上限 %d tokens）...\n", record.ReportRetries, taskcontext.MaxReportRetries, maxTokens)
+		} else {
+			fmt.Fprintf(os.Stderr, "Agent 第 %d/%d 轮分析...\n", step+1, taskcontext.MaxRounds)
+		}
 		resp, err := llm.Post(endpoint, key, body)
 		if err != nil {
 			return err
@@ -220,6 +233,25 @@ func RunPath(task, target string) (runErr error) {
 		}
 		if err = json.Unmarshal(choice.Message, &msg); err != nil {
 			return err
+		}
+		if choice.Finish == "length" {
+			if strings.TrimSpace(msg.Content) != "" {
+				record.PartialReports = append(record.PartialReports, msg.Content)
+				fmt.Printf("部分报告（输出被截断，内容不完整，不能视为已完成审查）：\n%s\n", msg.Content)
+			}
+			if record.ReportRetries >= taskcontext.MaxReportRetries {
+				return fmt.Errorf("模型输出再次达到长度上限（%d tokens），已停止重试；已有正文已标为不完整并保存在运行记录 partial_reports 中", maxTokens)
+			}
+			record.ReportRetries++
+			if finalRound {
+				reportTokens = taskcontext.ReportRetryCompletionTokens
+			}
+			reportOnly = true
+			// Do not append an incomplete assistant/tool-call message. The original
+			// evidence remains available; ask for a complete, shorter replacement.
+			messages = append(messages, map[string]string{"role": "user", "content": "上一次输出达到长度上限，被截断，尚未完成审查。现在停止探索，仅依据上文已有代码和工具证据重新给出完整、简洁的报告，不要续接半句，不要再调用工具。合并同一根因，保留已确认问题的行号、触发条件、影响和修复建议，明确未检查范围，不要把未确认疑点当作缺陷。"})
+			fmt.Fprintf(os.Stderr, "模型输出达到 %d tokens 上限，将仅重试汇报（输出上限 %d tokens）。\n", maxTokens, reportTokens)
+			continue
 		}
 		if choice.Finish != "stop" && choice.Finish != "tool_calls" {
 			return fmt.Errorf("模型未完成分析: %s", choice.Finish)

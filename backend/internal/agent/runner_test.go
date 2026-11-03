@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"example.com/Agent-Go/internal/code"
+	taskcontext "example.com/Agent-Go/internal/context"
 	"example.com/Agent-Go/internal/observability"
 )
 
@@ -92,6 +93,9 @@ func TestAgentReservedSummary(t *testing.T) {
 		if count == 8 {
 			if body["tool_choice"] != "none" {
 				t.Error("last round must reserve a report")
+			}
+			if body["max_tokens"] != float64(taskcontext.ReportCompletionTokens) {
+				t.Error("report must have its own output budget")
 			}
 			fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"Partial review, no confirmed findings"}}]}`)
 			return
@@ -395,5 +399,213 @@ func TestRunRecordsAndInstructions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Replay truncation both before reporting and at the last reserved report round.
+// An interrupted tool call must never be executed or sent back as an assistant
+// message without matching tool results.
+func TestLengthRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		truncateAt int
+		retry      string
+	}{
+		{"early", 1, "stop"},
+		{"last_round", 8, "stop"},
+		{"retry_truncated", 8, "length"},
+		{"retry_http_failure", 8, "http"},
+		{"reasoning_only", 1, "empty_partial"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, logs := t.TempDir(), t.TempDir()
+			writeCode(t, filepath.Join(root, "demo.go"), "package demo\nfunc Demo() {}\n")
+			count, expectedInput, expectedOutput := 0, 0, 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				count++
+				var request struct {
+					Messages   []json.RawMessage `json:"messages"`
+					MaxTokens  int               `json:"max_tokens"`
+					ToolChoice string            `json:"tool_choice"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					w.WriteHeader(400)
+					return
+				}
+				if count > tc.truncateAt+1 {
+					t.Error("unbounded report retries")
+					w.WriteHeader(500)
+					return
+				}
+				wantTokens := taskcontext.MaxCompletionTokens
+				if count == taskcontext.MaxRounds {
+					wantTokens = taskcontext.ReportCompletionTokens
+				}
+				if count > tc.truncateAt {
+					wantTokens = taskcontext.ReportCompletionTokens
+					if tc.truncateAt == taskcontext.MaxRounds {
+						wantTokens = taskcontext.ReportRetryCompletionTokens
+					}
+					if request.ToolChoice != "none" {
+						t.Error("length recovery must disable tools")
+					}
+					for _, message := range request.Messages {
+						if strings.Contains(string(message), "INTERRUPTED_TOOL") {
+							t.Error("truncated assistant message was replayed")
+						}
+					}
+					if tc.retry == "http" {
+						w.WriteHeader(503)
+						return
+					}
+				}
+				if request.MaxTokens != wantTokens {
+					t.Errorf("round %d: max_tokens=%d, want %d", count, request.MaxTokens, wantTokens)
+				}
+				finish, output := "stop", 20
+				message := map[string]any{"role": "assistant", "content": "COMPLETE_REPORT"}
+				if count < tc.truncateAt {
+					finish = "tool_calls"
+					args, _ := json.Marshal(map[string]string{"query": fmt.Sprintf("query%d", count)})
+					message = map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": fmt.Sprint(count), "type": "function", "function": map[string]string{"name": "search_code", "arguments": string(args)}}}}
+				} else if count == tc.truncateAt || tc.retry == "length" {
+					finish, output = "length", request.MaxTokens
+					message = map[string]any{"role": "assistant", "content": "PARTIAL_REPORT", "tool_calls": []any{map[string]any{"id": "INTERRUPTED_TOOL", "type": "function", "function": map[string]string{"name": "read_file", "arguments": `{"path":`}}}}
+					if tc.retry == "empty_partial" {
+						message = map[string]any{"role": "assistant", "content": nil, "reasoning_content": "INTERNAL_REASONING"}
+					}
+				}
+				expectedInput += 10
+				expectedOutput += output
+				json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": finish, "message": message}}, "usage": map[string]int{"prompt_tokens": 10, "completion_tokens": output}})
+			}))
+			defer srv.Close()
+			t.Setenv("REVIEW_URL", srv.URL)
+			t.Setenv("REVIEW_MODEL", "mock")
+			t.Setenv("REVIEW_API_KEY", "mock")
+			t.Setenv("AGENT_LOG_DIR", logs)
+			err := RunPath("check", root)
+			wantFailure := tc.retry == "length" || tc.retry == "http"
+			if (err != nil) != wantFailure {
+				t.Fatalf("error=%v, wantFailure=%v", err, wantFailure)
+			}
+			if tc.retry == "length" && !strings.Contains(err.Error(), "长度上限") {
+				t.Fatal(err)
+			}
+			if count != tc.truncateAt+1 {
+				t.Fatalf("got %d requests, want %d", count, tc.truncateAt+1)
+			}
+			paths, err := filepath.Glob(filepath.Join(logs, "*.json"))
+			if err != nil || len(paths) != 1 {
+				t.Fatalf("log paths=%v, err=%v", paths, err)
+			}
+			data, err := os.ReadFile(paths[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record observability.RunRecord
+			if err := json.Unmarshal(data, &record); err != nil {
+				t.Fatal(err)
+			}
+			if record.ReportRetries != 1 || record.Input != expectedInput || record.Output != expectedOutput || len(record.Rounds) != expectedInput/10 {
+				t.Fatalf("retry accounting wrong: %+v", record)
+			}
+			wantPartials := 1
+			if tc.retry == "length" {
+				wantPartials = 2
+			} else if tc.retry == "empty_partial" {
+				wantPartials = 0
+			}
+			if len(record.PartialReports) != wantPartials {
+				t.Fatalf("partial reports lost: %+v", record.PartialReports)
+			}
+			for _, partial := range record.PartialReports {
+				if partial != "PARTIAL_REPORT" {
+					t.Fatalf("unexpected partial report: %q", partial)
+				}
+			}
+			if wantFailure {
+				if record.Status != "failed" || record.Report != "" || record.Error == "" {
+					t.Fatal("incomplete report marked complete", record)
+				}
+			} else if record.Status != "reported" || record.Report != "COMPLETE_REPORT" || !record.UsageComplete {
+				t.Fatal("completed retry not recorded", record)
+			}
+		})
+	}
+}
+
+func TestOversizedReadsDoNotForceEarlyReport(t *testing.T) {
+	root, logs := t.TempDir(), t.TempDir()
+	lines := []string{"package demo"}
+	for n := 2; n <= 280; n++ {
+		lines = append(lines, fmt.Sprintf("// marker%d", n))
+	}
+	writeCode(t, filepath.Join(root, "main.go"), strings.Join(lines, "\n"))
+	spans := []struct{ start, end int }{{1, 120}, {120, 280}, {120, 240}, {240, 280}}
+	count := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count++
+		var request struct {
+			Messages   []json.RawMessage `json:"messages"`
+			ToolChoice string            `json:"tool_choice"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		if request.ToolChoice == "none" {
+			t.Error("oversized reads caused premature reporting")
+		}
+		if count == 3 || count == 4 {
+			last := string(request.Messages[len(request.Messages)-1])
+			if !strings.Contains(last, "truncated=true next_start=240") || strings.Contains(last, "工具错误") {
+				t.Error("read should return a bounded page and its continuation", last)
+			}
+		}
+		if count <= len(spans) {
+			span := spans[count-1]
+			args, _ := json.Marshal(map[string]any{"path": "main.go", "start": span.start, "end": span.end})
+			json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": "tool_calls", "message": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": fmt.Sprint(count), "type": "function", "function": map[string]string{"name": "read_file", "arguments": string(args)}}}}}}})
+			return
+		}
+		last := string(request.Messages[len(request.Messages)-1])
+		if !strings.Contains(last, "280 // marker280") || !strings.Contains(last, "next_start=0") {
+			t.Error("file tail was not read", last)
+		}
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"file tail checked"}}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("REVIEW_URL", srv.URL)
+	t.Setenv("REVIEW_MODEL", "mock")
+	t.Setenv("REVIEW_API_KEY", "mock")
+	t.Setenv("AGENT_LOG_DIR", logs)
+	if err := RunPath("check", root); err != nil {
+		t.Fatal(err)
+	}
+	if count != len(spans)+1 {
+		t.Fatalf("got %d requests, want %d", count, len(spans)+1)
+	}
+	paths, err := filepath.Glob(filepath.Join(logs, "*.json"))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("log paths=%v, err=%v", paths, err)
+	}
+	data, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record observability.RunRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "reported" || len(record.Tools) != len(spans) {
+		t.Fatal("read sequence not completed", record)
+	}
+	for _, call := range record.Tools {
+		if call.Failed {
+			t.Fatal("oversized read marked failed", call)
+		}
 	}
 }

@@ -42,22 +42,27 @@ func Execute(name string, a Args, files []string) (string, error) {
 		if a.Start <= 0 {
 			a.Start = 1
 		}
-		if a.End == 0 {
-			a.End = a.Start + 79
-		}
-		if a.End < a.Start || a.End-a.Start >= 120 {
-			return "", fmt.Errorf("每次最多读取 120 行")
-		}
 		lines := strings.Split(src, "\n")
 		if a.Start > len(lines) {
 			return "", fmt.Errorf("%s 共 %d 行，请勿继续读取文件末尾之后的范围", a.Path, len(lines))
 		}
+		if a.End == 0 {
+			a.End = a.Start + 79
+		}
+		if a.End < a.Start {
+			return "", fmt.Errorf("结束行号不能小于起始行号：start=%d end=%d", a.Start, a.End)
+		}
+		requestedEnd := min(a.End, len(lines))
+		end := min(requestedEnd, a.Start+119)
+		nextStart := 0
+		if end < len(lines) {
+			nextStart = end + 1
+		}
 		v, _ := code.CodeVersion(a.Version)
-		fmt.Fprintf(&out, "文件 %s version=%s 共 %d 行；读取范围 %d-%d\n", a.Path, v, len(lines), a.Start, min(a.End, len(lines)))
-		for i, line := range lines {
-			if i+1 >= a.Start && i+1 <= a.End {
-				fmt.Fprintf(&out, "%d %s\n", i+1, line)
-			}
+		fmt.Fprintf(&out, "文件 %s version=%s 共 %d 行；读取范围 %d-%d\n", a.Path, v, len(lines), a.Start, end)
+		fmt.Fprintf(&out, "truncated=%t next_start=%d（0表示文件末尾）。超长请求已自动限制为最多120行；如需继续，请从 next_start 开始读取。只有上述实际范围已读取。\n", end < requestedEnd, nextStart)
+		for i := a.Start - 1; i < end; i++ {
+			fmt.Fprintf(&out, "%d %s\n", i+1, lines[i])
 		}
 	case "staged_diff":
 		changes, err := code.InspectSelected(a.Path)

@@ -83,7 +83,7 @@ func filesAtVersion(files []string, version string) ([]string, error) {
 
 func scopedFiles(files []string, prefix string) ([]string, error) {
 	if strings.Contains(prefix, "\\") || strings.HasPrefix(prefix, "/") || strings.Contains(prefix, ":") {
-		return nil, fmt.Errorf("path_prefix 必须为项目内的正斜杠路径")
+		return nil, fmt.Errorf("path_prefix 必须为项目内的正斜杠相对路径，例如 internal；列出根目录请省略 path_prefix 或传空字符串，不能传 Windows 绝对路径")
 	}
 	prefix = strings.TrimSuffix(prefix, "/")
 	if prefix != "" && (path.Clean(prefix) != prefix || prefix == ".." || strings.HasPrefix(prefix, "../")) {
