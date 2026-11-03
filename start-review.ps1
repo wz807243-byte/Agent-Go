@@ -106,7 +106,7 @@ try {
             $checkTask = $matches[3]
             if (!$checkTask) { $checkTask = '检查指定路径中的正确性问题' }
         } elseif ($question -match '^/check(?:[ ]*)$') {
-            Write-Host '用法：/check review.go 或 /check "子目录/文件.go" 审查要求'
+            Write-Host '用法：/check backend/internal/review/service.go 或 /check "子目录/文件.go" 审查要求'
             continue
         }
         if ($checkFile -or $question -match '^/agent(?:[ ]+(.*))?$' -or $question -in @('检查代码','审查代码')) {
@@ -117,9 +117,9 @@ try {
             $agentOutput = @()
             if ($checkFile) {
                 $task = "审查文件 ${checkFile}：$checkTask"
-                go run . agent --path $checkFile $checkTask | Tee-Object -Variable agentOutput
+                go run ./backend/cmd/agent agent --path $checkFile $checkTask | Tee-Object -Variable agentOutput
             } else {
-                go run . agent $task | Tee-Object -Variable agentOutput
+                go run ./backend/cmd/agent agent $task | Tee-Object -Variable agentOutput
             }
             $agentExit = $LASTEXITCODE
             $lastAgentReport = ($agentOutput -join "`n")
@@ -146,17 +146,18 @@ try {
             $parts = @()
             $used = 0
             $skipped = @()
-            foreach ($file in (Get-ChildItem -LiteralPath $PSScriptRoot -File -Filter '*.go' | Sort-Object Name)) {
-                if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 48000) { $skipped += $file.Name; continue }
-                $part = $file.Name + "`n" + [IO.File]::ReadAllText($file.FullName) + "`n"
+            foreach ($file in (Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'backend') -Recurse -File -Filter '*.go' | Sort-Object FullName)) {
+                $relative = $file.FullName.Substring($PSScriptRoot.Length + 1)
+                if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 48000) { $skipped += $relative; continue }
+                $part = $relative + "`n" + [IO.File]::ReadAllText($file.FullName) + "`n"
                 $size = [Text.Encoding]::UTF8.GetByteCount($part)
-                if ($used + $size -gt 48000) { $skipped += $file.Name; continue }
+                if ($used + $size -gt 48000) { $skipped += $relative; continue }
                 $parts += $part
                 $used += $size
-                Write-Host "读取 $($file.Name)"
+                Write-Host "读取 $relative"
             }
             if ($skipped.Count) { Write-Host "已跳过：$($skipped -join ', ')" }
-            if (!$parts.Count) { Write-Host '没有可读取的顶层 Go 文件。'; continue }
+            if (!$parts.Count) { Write-Host '没有可读取的 Go 文件。'; continue }
             $question = "审查以下工作目录中的 Go 文件，指出有代码依据的问题。`n" + ($parts -join "`n")
         }
         if ($question -match '^[a-zA-Z0-9_.-]+[.]go$') {
@@ -173,7 +174,7 @@ try {
         }
         if ($question -eq '/review') {
             Write-Host '正在读取 Git 暂存区的 Go 变更...'
-            $snapshot = (go run . inspect | Out-String).Trim()
+            $snapshot = (go run ./backend/cmd/agent inspect | Out-String).Trim()
             if ($LASTEXITCODE -ne 0) { continue }
             if ($snapshot -eq '[]') { Write-Host '没有暂存的 Go 文件变更。'; continue }
             if ([Text.Encoding]::UTF8.GetByteCount($snapshot) -gt 48000) { Write-Host '改动过大，请分批暂存。'; continue }

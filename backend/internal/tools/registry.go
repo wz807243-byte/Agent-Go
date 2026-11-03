@@ -1,8 +1,10 @@
-package main
+package tools
 
-import "os"
+import (
+	"os"
+)
 
-func agentToolDefinitions() []any {
+func Definitions() []any {
 	str := func() map[string]any { return map[string]any{"type": "string"} }
 	num := func() map[string]any { return map[string]any{"type": "integer", "minimum": 0} }
 	version := func() map[string]any {

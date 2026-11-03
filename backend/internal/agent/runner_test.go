@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"encoding/json"
@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"example.com/Agent-Go/internal/code"
+	"example.com/Agent-Go/internal/observability"
 )
 
 func TestAgentToolLoop(t *testing.T) {
@@ -16,7 +19,7 @@ func TestAgentToolLoop(t *testing.T) {
 	if err := os.WriteFile("example.go", []byte("package demo\nfunc Broken() int { return -1 }\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := git("init"); err != nil {
+	if _, err := code.Git("init"); err != nil {
 		t.Fatal(err)
 	}
 	round := 0
@@ -43,7 +46,7 @@ func TestAgentToolLoop(t *testing.T) {
 	t.Setenv("REVIEW_MODEL", "mock")
 	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
-	if err := runAgent("check code"); err != nil {
+	if err := Run("check code"); err != nil {
 		t.Fatal(err)
 	}
 	if round != 2 {
@@ -51,33 +54,9 @@ func TestAgentToolLoop(t *testing.T) {
 	}
 }
 
-func TestAgentReadScope(t *testing.T) {
-	root := t.TempDir()
-	t.Chdir(root)
-	if err := os.WriteFile("ok.go", []byte("package demo"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := agentRead("ok.go", []string{"ok.go"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := agentRead("../secret.go", []string{"ok.go"}); err == nil {
-		t.Fatal("unlisted path allowed")
-	}
-	outside := filepath.Join(t.TempDir(), "outside.go")
-	if err := os.WriteFile(outside, []byte("private"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := agentRead(outside, []string{outside}); err == nil {
-		t.Fatal("outside path allowed")
-	}
-	if _, err := agentTool("read_file", agentArgs{Path: "ok.go", Start: 1, End: 999}, []string{"ok.go"}); err == nil {
-		t.Fatal("large read allowed")
-	}
-}
-
 func TestAgentRejectsToolsDuringSummary(t *testing.T) {
 	t.Chdir(t.TempDir())
-	if _, err := git("init"); err != nil {
+	if _, err := code.Git("init"); err != nil {
 		t.Fatal(err)
 	}
 	count := 0
@@ -90,7 +69,7 @@ func TestAgentRejectsToolsDuringSummary(t *testing.T) {
 	t.Setenv("REVIEW_MODEL", "mock")
 	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
-	err := runAgent("check")
+	err := Run("check")
 	if err == nil || !strings.Contains(err.Error(), "汇报轮") || count != 4 {
 		t.Fatalf("expected limit, got %v and %d calls", err, count)
 	}
@@ -98,7 +77,7 @@ func TestAgentRejectsToolsDuringSummary(t *testing.T) {
 
 func TestAgentReservedSummary(t *testing.T) {
 	t.Chdir(t.TempDir())
-	if _, err := git("init"); err != nil {
+	if _, err := code.Git("init"); err != nil {
 		t.Fatal(err)
 	}
 	count := 0
@@ -126,7 +105,7 @@ func TestAgentReservedSummary(t *testing.T) {
 	t.Setenv("REVIEW_MODEL", "mock")
 	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
-	if err := runAgent("check"); err != nil {
+	if err := Run("check"); err != nil {
 		t.Fatal(err)
 	}
 	if count != 8 {
@@ -144,10 +123,10 @@ func TestFileAgentRestrictsAllTools(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := git("init"); err != nil {
+	if _, err := code.Git("init"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := git("add", "--", "target.go", "other.go"); err != nil {
+	if _, err := code.Git("add", "--", "target.go", "other.go"); err != nil {
 		t.Fatal(err)
 	}
 	round := 0
@@ -193,7 +172,7 @@ func TestFileAgentRestrictsAllTools(t *testing.T) {
 	t.Setenv("REVIEW_MODEL", "mock")
 	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
-	if err := runFileAgent("check", "target.go"); err != nil {
+	if err := RunPath("check", "target.go"); err != nil {
 		t.Fatal(err)
 	}
 	if round != 2 {
@@ -243,11 +222,178 @@ func TestExternalDirectoryAgent(t *testing.T) {
 	t.Setenv("REVIEW_MODEL", "mock")
 	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
-	if err := runFileAgent("check", root); err != nil {
+	if err := RunPath("check", root); err != nil {
 		t.Fatal(err)
 	}
 	current, err := os.Getwd()
 	if err != nil || current != previous {
 		t.Fatal("working directory not restored")
+	}
+}
+
+func writeCode(t *testing.T, p, src string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(src), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDuplicateAndFailedToolsDoNotEndImmediately(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			code.Git("init")
+			writeCode(t, "demo.go", "package demo\n")
+			count := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				count++
+				var request map[string]json.RawMessage
+				json.NewDecoder(r.Body).Decode(&request)
+				if count == 3 && string(request["tool_choice"]) == `"none"` {
+					t.Error("one duplicate/error prematurely ended exploration")
+				}
+				if count <= 3 {
+					name, args := "list_files", "{}"
+					if failed {
+						if count == 2 {
+							writeCode(t, "demo.go", "package demo\n"+strings.Repeat("// extended\n", 100))
+						}
+						name, args = "read_file", `{"path":"demo.go","start":99}`
+					}
+					if count == 3 {
+						name, args = "search_code", `{"query":"package"}`
+					}
+					json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": "tool_calls", "message": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": fmt.Sprint(count), "type": "function", "function": map[string]string{"name": name, "arguments": args}}}}}}})
+				} else {
+					fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}`)
+				}
+			}))
+			defer srv.Close()
+			t.Setenv("REVIEW_URL", srv.URL)
+			t.Setenv("REVIEW_API_KEY", "mock")
+			logs := t.TempDir()
+			t.Setenv("AGENT_LOG_DIR", logs)
+			if err := Run("review"); err != nil {
+				t.Fatal(err)
+			}
+			paths, _ := filepath.Glob(filepath.Join(logs, "*.json"))
+			data, _ := os.ReadFile(paths[0])
+			var record observability.RunRecord
+			json.Unmarshal(data, &record)
+			if len(record.Tools) != 3 || record.Tools[1].Cached == failed {
+				t.Fatalf("wrong cache record: %+v", record.Tools)
+			}
+		})
+	}
+}
+
+func TestDefaultVersionFollowsStagedDiff(t *testing.T) {
+	t.Chdir(t.TempDir())
+	code.Git("init")
+	writeCode(t, "demo.go", "package demo\nfunc Value() int {return 1}\n")
+	code.Git("add", "demo.go")
+	if _, err := code.Git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	writeCode(t, "demo.go", "package demo\nfunc Value() int {return 2} // STAGED_MARKER\n")
+	code.Git("add", "demo.go")
+	writeCode(t, "demo.go", "package demo\nfunc Value() int {return 3} // WORKING_MARKER\n")
+	round := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		round++
+		var body struct{ Messages []json.RawMessage }
+		json.NewDecoder(r.Body).Decode(&body)
+		if round == 3 {
+			last := string(body.Messages[len(body.Messages)-1])
+			if !strings.Contains(last, "STAGED_MARKER") || strings.Contains(last, "WORKING_MARKER") {
+				t.Error("mixed versions", last)
+			}
+			fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}`)
+			return
+		}
+		name, args := "staged_diff", "{}"
+		if round == 2 {
+			name, args = "read_file", `{"path":"demo.go"}`
+		}
+		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": "tool_calls", "message": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": fmt.Sprint(round), "type": "function", "function": map[string]string{"name": name, "arguments": args}}}}}}})
+	}))
+	defer srv.Close()
+	t.Setenv("REVIEW_URL", srv.URL)
+	t.Setenv("REVIEW_API_KEY", "mock")
+	t.Setenv("AGENT_LOG_DIR", t.TempDir())
+	if err := Run("审查暂存变更"); err != nil {
+		t.Fatal(err)
+	}
+	if round != 3 {
+		t.Fatal(round)
+	}
+}
+
+func TestRunRecordsAndInstructions(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+			root := t.TempDir()
+			logs := t.TempDir()
+			os.WriteFile(filepath.Join(root, "demo.go"), []byte("package demo"), 0600)
+			os.WriteFile(filepath.Join(root, "任务说明.md"), []byte("BUSINESS_REQUIREMENT"), 0600)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct{ Messages []json.RawMessage }
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+				}
+				joined := fmt.Sprint(request.Messages)
+				raw, _ := json.Marshal(request)
+				if !strings.Contains(string(raw), "BUSINESS_REQUIREMENT") {
+					t.Errorf("missing task instructions: %s", joined)
+				}
+				if failed {
+					w.WriteHeader(401)
+					return
+				}
+				fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"finished"}}],"usage":{"prompt_tokens":40,"completion_tokens":5,"prompt_cache_hit_tokens":12,"completion_tokens_details":{"reasoning_tokens":3}}}`)
+			}))
+			defer srv.Close()
+			t.Setenv("REVIEW_URL", srv.URL)
+			t.Setenv("REVIEW_MODEL", "mock")
+			t.Setenv("REVIEW_API_KEY", "mock-secret")
+			t.Setenv("AGENT_LOG_DIR", logs)
+			err := RunPath("check", root)
+			if (err != nil) != failed {
+				t.Fatalf("error=%v", err)
+			}
+			paths, _ := filepath.Glob(filepath.Join(logs, "*.json"))
+			if len(paths) != 1 {
+				t.Fatalf("records=%v", paths)
+			}
+			data, err := os.ReadFile(paths[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "mock-secret") {
+				t.Fatal("key logged")
+			}
+			var record observability.RunRecord
+			if err := json.Unmarshal(data, &record); err != nil {
+				t.Fatal(err)
+			}
+			if len(record.Instructions) != 1 {
+				t.Fatal("loaded instruction paths not saved")
+			}
+			if failed {
+				if record.Status != "failed" || record.Error == "" || record.UsageComplete {
+					t.Fatal("failed task status wrong")
+				}
+			} else {
+				if record.Status != "reported" || !record.UsageComplete || record.Total != 45 || record.Input != 40 || record.Output != 5 {
+					t.Fatal("usage totals wrong")
+				}
+				if !strings.Contains(string(record.Rounds[0]), "reasoning_tokens") || !strings.Contains(string(record.Rounds[0]), "prompt_cache_hit_tokens") {
+					t.Fatal("usage details lost")
+				}
+			}
+		})
 	}
 }

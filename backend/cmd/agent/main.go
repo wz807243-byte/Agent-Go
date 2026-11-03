@@ -4,16 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
-)
 
-func git(args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
-	return string(out), err
-}
+	"example.com/Agent-Go/internal/agent"
+	"example.com/Agent-Go/internal/code"
+	"example.com/Agent-Go/internal/review"
+)
 
 func run() error {
 	if len(os.Args) == 1 {
@@ -23,25 +19,25 @@ func run() error {
 	if os.Args[1] == "agent" {
 		if len(os.Args) >= 3 && (os.Args[2] == "--file" || os.Args[2] == "--path") {
 			if len(os.Args) < 4 {
-				return fmt.Errorf("用法: go run . agent --file review.go [审查要求]")
+				return fmt.Errorf("用法: go run ./backend/cmd/agent agent --file backend/internal/review/service.go [审查要求]")
 			}
 			task := strings.Join(os.Args[4:], " ")
 			if task == "" {
 				task = "检查指定文件中的正确性问题"
 			}
-			return runFileAgent(task, os.Args[3])
+			return agent.RunPath(task, os.Args[3])
 		}
 		if len(os.Args) < 3 {
-			return fmt.Errorf("用法: go run . agent 检查当前项目")
+			return fmt.Errorf("用法: go run ./backend/cmd/agent agent 检查当前项目")
 		}
-		return runAgent(strings.Join(os.Args[2:], " "))
+		return agent.Run(strings.Join(os.Args[2:], " "))
 	}
 	if len(os.Args) != 2 {
-		return fmt.Errorf("用法: go run . diff|inspect|review")
+		return fmt.Errorf("用法: go run ./backend/cmd/agent diff|inspect|review")
 	}
 	switch os.Args[1] {
 	case "diff":
-		out, err := git("diff", "--cached", "--no-color", "--")
+		out, err := code.Git("diff", "--cached", "--no-color", "--")
 		if err != nil {
 			return err
 		}
@@ -52,27 +48,28 @@ func run() error {
 		}
 		return nil
 	case "inspect", "review":
-		root, err := git("rev-parse", "--show-toplevel")
+		root, err := code.Git("rev-parse", "--show-toplevel")
 		if err != nil {
 			return err
 		}
 		if err = os.Chdir(strings.TrimSpace(root)); err != nil {
 			return err
 		}
-		changes, err := inspect()
+		changes, err := code.Inspect()
 		if err != nil {
 			return err
 		}
 		if os.Args[1] == "review" {
-			return review(changes)
+			return review.Run(changes)
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(changes)
 	default:
-		return fmt.Errorf("用法: go run . diff|inspect|review")
+		return fmt.Errorf("用法: go run ./backend/cmd/agent diff|inspect|review")
 	}
 }
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
