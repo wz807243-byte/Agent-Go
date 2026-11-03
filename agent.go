@@ -31,6 +31,7 @@ type agentArgs struct {
 	Cursor     int    `json:"cursor"`
 	Limit      int    `json:"limit"`
 	SymbolID   string `json:"symbol_id"`
+	Pattern    string `json:"pattern"`
 }
 
 func agentFiles() ([]string, error) {
@@ -112,6 +113,8 @@ func agentTool(name string, a agentArgs, files []string) (string, error) {
 			return "", fmt.Errorf("AST 符号工具已关闭")
 		}
 		return symbolTool(name, a, files)
+	case "search_structure":
+		return structureTool(a, files)
 	case "read_file":
 		src, err := versionRead(a.Path, a.Version, files)
 		if err != nil {
@@ -272,7 +275,7 @@ func runFileAgent(task, target string) (runErr error) {
 	if context != "" {
 		messages = append(messages, map[string]string{"role": "user", "content": context})
 	}
-	record := runRecord{Started: time.Now(), Project: root, Task: task, Model: model, Status: "failed", UsageComplete: true, Instructions: loaded, Features: map[string]bool{"symbols": os.Getenv("AGENT_SYMBOLS") != "0"}}
+	record := runRecord{Started: time.Now(), Project: root, Task: task, Model: model, Status: "failed", UsageComplete: true, Instructions: loaded, Features: map[string]bool{"symbols": os.Getenv("AGENT_SYMBOLS") != "0", "ast_grep": os.Getenv("AGENT_AST_GREP") == "1"}}
 	logDir := os.Getenv("AGENT_LOG_DIR")
 	if logDir == "" {
 		logDir = filepath.Join(originalDir, ".agent-go", "runs")

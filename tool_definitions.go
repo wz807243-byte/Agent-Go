@@ -29,5 +29,11 @@ func agentToolDefinitions() []any {
 		add("list_symbols", "列出 Go 文件中的函数、方法、类型、变量和常量。返回含版本和内容哈希的 symbol_id。", map[string]any{"path": str(), "version": version(), "cursor": num(), "limit": num()}, "path")
 		add("read_symbol", "读取完整声明；超长声明用文件绝对行号 start/end 分段读取。", map[string]any{"symbol_id": str(), "start": num(), "end": num()}, "symbol_id")
 	}
+	if os.Getenv("AGENT_AST_GREP") == "1" {
+		p := page()
+		p["pattern"] = str()
+		p["path"] = str()
+		add("search_structure", "用 ast-grep 搜索 Go 语法结构，仅读取。最多50文件，支持结果分页；匹配不等于缺陷。", p, "pattern")
+	}
 	return out
 }
