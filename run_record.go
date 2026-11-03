@@ -9,7 +9,16 @@ import (
 	"time"
 )
 
+type toolRecord struct {
+	Name      string    `json:"name"`
+	Arguments agentArgs `json:"arguments"`
+	Cached    bool      `json:"cached"`
+	Bytes     int       `json:"result_bytes"`
+	Failed    bool      `json:"failed"`
+}
+
 type runRecord struct {
+	Tools         []toolRecord      `json:"tools"`
 	Started       time.Time         `json:"started_at"`
 	DurationMS    int64             `json:"duration_ms"`
 	Project       string            `json:"project"`

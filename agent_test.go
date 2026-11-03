@@ -91,7 +91,7 @@ func TestAgentRejectsToolsDuringSummary(t *testing.T) {
 	t.Setenv("AGENT_LOG_DIR", t.TempDir())
 	t.Setenv("REVIEW_API_KEY", "mock")
 	err := runAgent("check")
-	if err == nil || !strings.Contains(err.Error(), "汇报轮") || count != 3 {
+	if err == nil || !strings.Contains(err.Error(), "汇报轮") || count != 4 {
 		t.Fatalf("expected limit, got %v and %d calls", err, count)
 	}
 }
