@@ -2,8 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
@@ -233,6 +238,145 @@ func pageTool(name string, a agentArgs, files []string) (string, error) {
 	}
 	data, err := json.Marshal(page)
 	return string(data), err
+}
+
+type symbolRef struct {
+	Path    string `json:"path"`
+	Version string `json:"version"`
+	Name    string `json:"name"`
+	First   int    `json:"first"`
+	Last    int    `json:"last"`
+	Hash    string `json:"hash"`
+}
+type symbolEntry struct {
+	symbolRef
+	ID string `json:"symbol_id"`
+}
+
+// Keep IDs small enough to return symbol lists without duplicating all metadata.
+func symbolID(ref symbolRef) string {
+	data, _ := json.Marshal(ref)
+	digest := sha256.Sum256(data)
+	return ref.Version + ":" + base64.RawURLEncoding.EncodeToString([]byte(ref.Path)) + ":" + fmt.Sprintf("%x", digest[:16])
+}
+
+func parseSymbolID(id string) (symbolRef, error) {
+	parts := strings.Split(id, ":")
+	if len(parts) != 3 || len(parts[2]) != 32 {
+		return symbolRef{}, fmt.Errorf("无效 symbol_id，请重新 list_symbols")
+	}
+	version, err := codeVersion(parts[0])
+	if err != nil || parts[0] == "" {
+		return symbolRef{}, fmt.Errorf("无效 symbol_id 版本")
+	}
+	p, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return symbolRef{}, fmt.Errorf("无效 symbol_id 路径")
+	}
+	return symbolRef{Path: string(p), Version: version}, nil
+}
+
+func fileSymbols(p, v, src string) ([]symbolEntry, error) {
+	fs := token.NewFileSet()
+	f, err := parser.ParseFile(fs, p, src, 0)
+	if err != nil {
+		return nil, err
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(src)))
+	out := []symbolEntry{}
+	appendDecl := func(name string, node ast.Node) {
+		r := symbolRef{p, v, name, fs.PositionFor(node.Pos(), false).Line, fs.PositionFor(node.End(), false).Line, hash}
+		out = append(out, symbolEntry{r, symbolID(r)})
+	}
+	for _, d := range f.Decls {
+		switch n := d.(type) {
+		case *ast.FuncDecl:
+			name := n.Name.Name
+			if n.Recv != nil {
+				start := fs.PositionFor(n.Recv.List[0].Type.Pos(), false).Offset
+				end := fs.PositionFor(n.Recv.List[0].Type.End(), false).Offset
+				name = src[start:end] + "." + name
+			}
+			appendDecl(name, n)
+		case *ast.GenDecl:
+			for _, s := range n.Specs {
+				switch x := s.(type) {
+				case *ast.TypeSpec:
+					appendDecl(x.Name.Name, n)
+				case *ast.ValueSpec:
+					for _, name := range x.Names {
+						appendDecl(name.Name, n)
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+func symbolTool(name string, a agentArgs, files []string) (string, error) {
+	v, err := codeVersion(a.Version)
+	if err != nil {
+		return "", err
+	}
+	var ref symbolRef
+	if name == "read_symbol" {
+		ref, err = parseSymbolID(a.SymbolID)
+		if err != nil {
+			return "", err
+		}
+		a.Path = ref.Path
+		v = ref.Version
+	}
+	src, err := versionRead(a.Path, v, files)
+	if err != nil {
+		return "", err
+	}
+	entries, err := fileSymbols(a.Path, v, src)
+	if err != nil {
+		return "", err
+	}
+	if name == "list_symbols" {
+		limit := a.Limit
+		if limit == 0 {
+			limit = 30
+		}
+		if a.Cursor < 0 || a.Cursor > len(entries) || limit < 1 || limit > 200 {
+			return "", fmt.Errorf("无效 cursor 或 limit")
+		}
+		end := min(a.Cursor+limit, len(entries))
+		next := 0
+		if end < len(entries) {
+			next = end
+		}
+		data, err := json.Marshal(map[string]any{"version": v, "symbols": entries[a.Cursor:end], "truncated": end < len(entries), "next_cursor": next})
+		if len(data) > 24000 {
+			return "", fmt.Errorf("符号列表过长，请减小 limit")
+		}
+		return string(data), err
+	}
+	for _, e := range entries {
+		if e.ID == a.SymbolID {
+			lines := strings.Split(src, "\n")
+			start, end := e.First, e.Last
+			if a.Start > 0 {
+				start = a.Start
+			}
+			if a.End > 0 {
+				end = a.End
+			}
+			if start < e.First || end > e.Last || start > end {
+				return "", fmt.Errorf("读取范围必须在符号 %d-%d 行内", e.First, e.Last)
+			}
+			code := strings.Join(lines[start-1:end], "\n")
+			if len(code) > 12000 {
+				return "", fmt.Errorf("符号过长（%d-%d 行），请用 start/end 分段读取", e.First, e.Last)
+			}
+			data, err := json.Marshal(map[string]any{"symbol": e, "start": start, "end": end, "code": code})
+			return string(data), err
+		}
+	}
+	return "", fmt.Errorf("symbol_id 已过期或无效，请重新 list_symbols")
 }
 
 var _ io.Writer = (*cappedBuffer)(nil)

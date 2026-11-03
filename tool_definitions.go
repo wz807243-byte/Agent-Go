@@ -1,5 +1,7 @@
 package main
 
+import "os"
+
 func agentToolDefinitions() []any {
 	str := func() map[string]any { return map[string]any{"type": "string"} }
 	num := func() map[string]any { return map[string]any{"type": "integer", "minimum": 0} }
@@ -23,5 +25,9 @@ func agentToolDefinitions() []any {
 	add("search_code", "按版本搜索字面文本，支持目录过滤和匹配分页；检查 skipped 和 truncated。", search, "query")
 	add("staged_diff", "读取暂存 Go 变更及前后声明，before 为 HEAD、after 为 staged。", map[string]any{"path": str()})
 	add("read_file", "按版本读取代码，最多120行。未指定版本时使用当前任务默认版本。", map[string]any{"path": str(), "version": version(), "start": num(), "end": num()}, "path")
+	if os.Getenv("AGENT_SYMBOLS") != "0" {
+		add("list_symbols", "列出 Go 文件中的函数、方法、类型、变量和常量。返回含版本和内容哈希的 symbol_id。", map[string]any{"path": str(), "version": version(), "cursor": num(), "limit": num()}, "path")
+		add("read_symbol", "读取完整声明；超长声明用文件绝对行号 start/end 分段读取。", map[string]any{"symbol_id": str(), "start": num(), "end": num()}, "symbol_id")
+	}
 	return out
 }

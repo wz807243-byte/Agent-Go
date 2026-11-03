@@ -18,6 +18,7 @@ type toolRecord struct {
 }
 
 type runRecord struct {
+	Features      map[string]bool   `json:"features"`
 	Tools         []toolRecord      `json:"tools"`
 	Started       time.Time         `json:"started_at"`
 	DurationMS    int64             `json:"duration_ms"`

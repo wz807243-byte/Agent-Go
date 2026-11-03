@@ -70,7 +70,7 @@ func TestSearchPastOriginalLimits(t *testing.T) {
 	}
 }
 
-func TestVersionedCode(t *testing.T) {
+func TestVersionedSymbols(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if _, err := git("init"); err != nil {
 		t.Fatal(err)
@@ -94,7 +94,27 @@ func TestVersionedCode(t *testing.T) {
 		if !strings.Contains(src, fmt.Sprintf("return %d", i+1)) {
 			t.Fatal(v, src)
 		}
-
+		result, err := agentTool("list_symbols", agentArgs{Path: "demo.go", Version: v}, files)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var page struct{ Symbols []symbolEntry }
+		if err = json.Unmarshal([]byte(result), &page); err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Symbols) != 1 {
+			t.Fatal(result)
+		}
+		code, err := agentTool("read_symbol", agentArgs{SymbolID: page.Symbols[0].ID}, files)
+		if err != nil || !strings.Contains(code, fmt.Sprintf("return %d", i+1)) {
+			t.Fatal(code, err)
+		}
+		if v == "working" {
+			writeCode(t, "demo.go", src+"\n")
+			if _, err := agentTool("read_symbol", agentArgs{SymbolID: page.Symbols[0].ID}, files); err == nil {
+				t.Fatal("stale symbol accepted")
+			}
+		}
 	}
 	if _, err := versionRead("../demo.go", "head", []string{"../demo.go"}); err == nil {
 		t.Fatal("escaped snapshot")
@@ -124,6 +144,28 @@ func TestVersionedCode(t *testing.T) {
 		if len(page.Items) != want {
 			t.Fatal("wrong version file set", v, result)
 		}
+	}
+}
+
+func TestSymbolReceiversAndLongDeclarations(t *testing.T) {
+	t.Chdir(t.TempDir())
+	src := "package demo\ntype A struct{}\ntype B struct{}\nfunc (a *A) Run() {}\nfunc (b B) Run() {}\nfunc Long() {\n" + strings.Repeat("// some comment\n", 1000) + "}\n"
+	writeCode(t, "demo.go", src)
+	entries, err := fileSymbols("demo.go", "working", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 5 || entries[2].Name != "*A.Run" || entries[3].Name != "B.Run" || entries[2].ID == entries[3].ID {
+		t.Fatal(entries)
+	}
+	a := agentArgs{SymbolID: entries[4].ID}
+	if _, err := symbolTool("read_symbol", a, []string{"demo.go"}); err == nil {
+		t.Fatal("oversized symbol accepted")
+	}
+	a.Start = entries[4].First
+	a.End = a.Start + 5
+	if _, err := symbolTool("read_symbol", a, []string{"demo.go"}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -225,5 +267,21 @@ func TestGitReadOutputLimit(t *testing.T) {
 	git("add", "large.go")
 	if _, err := versionRead("large.go", "staged", []string{"large.go"}); err == nil || !strings.Contains(err.Error(), "256 KB") {
 		t.Fatal("unbounded git output", err)
+	}
+}
+
+func TestFeatureGates(t *testing.T) {
+	t.Setenv("AGENT_SYMBOLS", "0")
+	data, _ := json.Marshal(agentToolDefinitions())
+	if strings.Contains(string(data), "list_symbols") {
+		t.Fatal("disabled tools exposed")
+	}
+	if _, err := agentTool("list_symbols", agentArgs{}, nil); err == nil {
+		t.Fatal("disabled tool executed")
+	}
+	t.Setenv("AGENT_SYMBOLS", "1")
+	data, _ = json.Marshal(agentToolDefinitions())
+	if !strings.Contains(string(data), "list_symbols") {
+		t.Fatal("enabled tools missing")
 	}
 }
